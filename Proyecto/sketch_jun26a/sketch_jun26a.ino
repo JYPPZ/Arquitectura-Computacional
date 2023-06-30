@@ -11,6 +11,11 @@
 #include <DHT.h>
 #define DHTPIN 7 // Pin al que está conectado el sensor DHT
 #define DHTTYPE DHT11 // Tipo de sensor DHT
+#define photocellPin A7 // Pin al que está conectado el sensor de luz
+#define buzzerPin 6 // Pin al que está conectado el buzzer
+#define trackerPin 4 // Pin al que está conectado el tracker
+#define hallPin A4 // Pin al que está conectado el hall
+
 DHT dht(DHTPIN, DHTTYPE); // Objeto DHT
 
 /* Display */
@@ -18,7 +23,7 @@ LiquidCrystal lcd(30, 31, 32, 33, 34, 35);
 /* Keypad setup */
 const byte KEYPAD_ROWS = 4;
 const byte KEYPAD_COLS = 4;
-byte rowPins[KEYPAD_ROWS] = {41, 43, 45, 47};
+byte rowPins[KEYPAD_ROWS] = {47, 45, 43, 41};
 byte colPins[KEYPAD_COLS] = {A3, A2, A1, A0};
 char keys[KEYPAD_ROWS][KEYPAD_COLS] = {
   {'1', '2', '3', '+'},
@@ -31,21 +36,22 @@ Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, KEYPAD_ROWS, KEYPAD_C
 const String correctPasscode = "1234"; // Clave correcta
 const int maxAttempts = 3; // Número máximo de intentos
 bool passwordCorrect = false; // true si la contraseña es correcta
-int attempts = 1;//intentos
+int attempts = 0;//intentos
 const unsigned long maxInputTime = 10000; // Tiempo máximo de espera para ingresar la contraseña (en milisegundos)
 /* Variables de cambio de estado */
-unsigned long state4StartTime = 0; // Almacena el tiempo en milisegundos cuando se entra al State_4
-const unsigned long state4Duration = 20000; // Duración en milisegundos para permanecer en el State_4
+unsigned long state3StartTime = 0; // Almacena el tiempo en milisegundos cuando se entra al State_4
+const unsigned long state3Duration = 20000; // Duración en milisegundos para permanecer en el State_4
 unsigned long state2StartTime = 0; // Almacena el tiempo en milisegundos cuando se entra al State_2
 const unsigned long state2Duration = 5000; // Duración en milisegundos para permanecer en el State_2
 const unsigned long state2Duration2 = 20000; // Duración en milisegundos para permanecer en el State_2
+unsigned long state4StartTime = 0; // Almacena el tiempo en milisegundos cuando se entra al State_5
+
 /* Variables humedad temperatura y luz */
-const int photocellPin = A7;
-float humedad;
-float temp;
-int luz;
-/* variablesa de buzzer */
-const int buzzerPin = 6;// Definir el pin del buzzer
+float humedad = 0.0f;
+float temp = 0.0f;
+int luz = 0;
+/* tracker variables */
+const int threshold = 800; // Umbral de detección (ajusta este valor según tu sensor)
 /**************************/
 
 /**
@@ -66,8 +72,7 @@ enum Estado {
   InicitialState,
   State_2,
   State_3,
-  State_4,
-  State_5
+  State_4
 };
 // Variable que guarda el estado actual
 Estado estadoActual;
@@ -90,35 +95,41 @@ void setup() {
   lcd.setCursor(0, 1);
   //ingresar al estado inicial
   estadoActual = InicitialState;
-  //Configurar el pin del buzzer como salida
+  /* Congiguracion de las entradas digitales de los diferentes sensores */
   pinMode(buzzerPin, OUTPUT);
+  pinMode(trackerPin, INPUT);
+  pinMode(hallPin, INPUT);
+  pinMode(DHTPIN, INPUT);
   //inicializar dht
   dht.begin();
-  
 }
 
 void loop() {
   updateCursor();
-  Serial.println("<--");
-  Serial.println(estadoActual);
+  Estado siguienteEstado = estadoActual;
   /* Alternar entre estados */
+  Serial.println(estadoActual);
   switch (estadoActual) {
     case InicitialState:
-      estado1();
+      siguienteEstado = estado1();
     break;
     case State_2:
-      estado2();
+      siguienteEstado = estado2();
     break;
     case State_3:
-      estado3();//vacio, @Todo Borrar y cambiar nombre de estados
+      siguienteEstado = estado3();
     break;
     case State_4:
-      estado4();
-    break;
-    case State_5:
-      estado5();
+      siguienteEstado = estado4();
     break;
     default: break;
+  }
+  // Actualizar el estado actual si ha cambiado
+  if (siguienteEstado != estadoActual) {
+    estadoActual = siguienteEstado;
+    state2StartTime = millis(); // inicializar conteo para esatdo 2
+    state3StartTime = millis(); // inicializar conteo para esatdo 3
+    state4StartTime = millis(); // inicializar conteo para esatdo 4
   }
 }
 
@@ -135,16 +146,14 @@ void handleKeypadInput() {
     }
   }
 }
-
 /**
 *@brief metodo para validar la contraseña ingresada por el usuario
-*@param digito ingresado en keypad
+*@param key digito ingresado en keypad
 *@return verdadero si la clave es verdadera
 */
 void validatePasscode(char key) {
   static String passcodeInput;
   passcodeInput += key;
-
   if (passcodeInput.length() == correctPasscode.length()) {
     if (passcodeInput == correctPasscode) {
       lcd.clear();
@@ -165,21 +174,14 @@ void validatePasscode(char key) {
     }
   }
 }
+
 /**
-*@brief obtiene valores de humedad y temperatura del ambiente en tiempo real
-*@return humedad y temperatura
+*@brief imprime en lcd los datos obtenidos en obtenerHumTempLuz(), lcd -> 16x2
 **/
-void obtenerHumTempLuz(){
+void displayDht(){
   humedad = dht.readHumidity();
   temp = dht.readTemperature();
   luz = analogRead(photocellPin);
-}
-/**
-*@brief imprime en lcd los datos obtenidos en obtenerHumTempLuz(), lcd -> 16x2
-*
-**/
-void displayDht(){
-   obtenerHumTempLuz();
    lcd.setCursor(0, 0);
    lcd.print("Hum:");
    lcd.setCursor(4, 0);
@@ -194,69 +196,100 @@ void displayDht(){
    lcd.print("luz:");
    lcd.setCursor(13, 0);
    lcd.print(luz);
+   Serial.println(temp);
 }
 /**
 **/
-void estado1(){
+int valorHall(){
+  int sensorValue = analogRead(hallPin);  // Leer el valor analógico del sensor
+  //Serial.println(sensorValue);
+  return sensorValue;
+}
+/**
+**/
+bool trackerProximidad() {
+  bool sensorValue = digitalRead(trackerPin);
+  return sensorValue;
+}
+
+/**
+**/
+int estado1(){
 //estado inicial, validar contraseña contraseña 
-      handleKeypadInput();
-      if (passwordCorrect == true){
-        estadoActual = State_2;
-      }
-      if(attempts >= maxAttempts){
-        estadoActual = State_4;
-      }
+  handleKeypadInput();
+  //Serial.println(attempts);
+  if (passwordCorrect == true){
+    Serial.println("true");
+    attempts = 1; // reiniciar intentos
+    return State_2;
+  }
+  else if(attempts >= maxAttempts){
+    //Serial.println("dentro");
+    return State_4;
+  }
+  return InicitialState;
 }
 /**
 **/
-void estado2(){
+int estado2(){
 //lectura de humedad y luz
-    delay(2000);
+  Serial.println("estado 2");
+  lcd.clear();
+  displayDht();
+  if (temp > 30) {
+    tone(buzzerPin, 1000, 200); // Encender el buzzer
     lcd.clear();
-    displayDht();
-    if (temp > 30) {
-      tone(buzzerPin, 1000, 200); // Encender el buzzer
-      lcd.clear();
-      lcd.print("Temperatura > 30C");
-      //cambiar de estado si pasa de 20 segundos
-      if (state2StartTime == 0) {
-        state2StartTime = millis();
-      }
-      if (millis() - state2StartTime > state2Duration2) {
-        estadoActual = State_4;
-        state2StartTime = 0; // Reinicia el tiempo para el próximo ciclo en el State_2
-      }
+    lcd.print("Temperatura > 32.0fC");
+    //cambiar de estado si pasa de 20 segundos
+    if (millis() - state2StartTime > state2Duration2) {
+      state2StartTime = 0; // Reinicia el tiempo para el próximo ciclo en el State_2
+      return State_3;
     }
+  }
+  if (millis() - state2StartTime >= 2500) {
+    Serial.println("pasa a 3");
+    return State_4;
+  }
+  delay(100);
+  return State_2;
 }
 /**
 **/
-void estado3(){
-//estado activador de buzzer
-      
-}
-/**
-**/
-void estado4(){
+int estado3(){
 // Acciones cuando la máquina está bloqueada
-  if (state4StartTime == 0) {
-  // Guarda el tiempo actual al entrar al State_4
-  state4StartTime = millis();
-  lcd.clear();
-  lcd.print("Sistema bloqueado");
-  } else {
-    // Comprueba si ha transcurrido el tiempo necesario para la transición al State_5
-    if (millis() - state4StartTime >= state4Duration) {
-      estadoActual = State_5;
-      state4StartTime = 0; // Reinicia el tiempo para el próximo ciclo en el State_4
-      attempts = 1; // Reinicia el contador de intentos
-      }
+  Serial.println("estado 3");
+    lcd.clear();
+    lcd.print("Sistema bloqueado");
+    // Comprueba si ha transcurrido el tiempo necesario para la transición al State_4
+    if (millis() - state3StartTime >= state3Duration) {
+      return State_4;
+      attempts = 0; // Reinicia el contador de intentos
     }
-//@Todo agregar funcionalidades
+  delay(100);
+  return State_3;
 }
 /**
 **/
-void estado5(){
+int estado4() {
+// Estado sensores hall y tracker
   lcd.clear();
-  lcd.print("estado 5");
-  delay(2000);
+  Serial.println("estado 4");
+  lcd.print("Sensor activo...");
+  //Serial.println(valorHall());
+  // Verificar si se ha alcanzado el tiempo para cambiar al Estado 3
+  if (valorHall() < threshold) {
+    lcd.clear();
+    lcd.print("Objeto detectado");  // Imprimir un mensaje si el objeto es detectado
+    Serial.println("pasa a 2");
+    return State_3;
+  }
+  // Verificar si se ha alcanzado el tiempo para cambiar al Estado 2
+  if (millis() - state4StartTime >= 1500) {
+    //state4StartTime = 0; // Reiniciar el tiempo para el Estado 4
+    Serial.println("pasa a 1");
+    return State_2;
+  }
+  // Permanecer en el Estado 4
+  delay(100);
+  return State_4;
 }
